@@ -1,34 +1,25 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import puppeteer from "@cloudflare/puppeteer";
 import { z } from "zod";
 
-// Define Cloudflare Worker environment bindings
 export interface Env {
   BREWFATHER_USER_ID: string;
   BREWFATHER_API_KEY: string;
-  MYBROWSER: Fetcher; // Cloudflare Puppeteer binding
+  MYBROWSER: Fetcher; // Cloudflare Puppeteer binding defined in wrangler.jsonc
 }
 
-// Interfaces for Brewfather recipe items
 interface Fermentable {
   name: string;
-  amount: number; // in kg
-  type?: string;
-  use?: string;
+  amount: number; // kg
 }
 
 interface Hop {
   name: string;
-  amount: number; // in grams
-  use?: string;
-  time?: number;
-  alpha?: number;
+  amount: number; // grams
 }
 
 interface Yeast {
   name: string;
-  amount: number;
-  laboratory?: string;
-  productId?: string;
 }
 
 interface BrewfatherRecipe {
@@ -39,15 +30,13 @@ interface BrewfatherRecipe {
   yeasts: Yeast[];
 }
 
-// 1. Fetch recipe directly from Brewfather REST API v2
+// 1. Fetch recipe from Brewfather API
 async function fetchBrewfatherRecipe(
   recipeId: string,
   userId: string,
   apiKey: string,
 ): Promise<BrewfatherRecipe> {
-  // Brewfather API v2 requires Basic Auth using base64(userId:apiKey)
   const credentials = btoa(`${userId}:${apiKey}`);
-
   const response = await fetch(
     `https://api.brewfather.app/v2/recipes/${recipeId}`,
     {
@@ -60,76 +49,158 @@ async function fetchBrewfatherRecipe(
   );
 
   if (!response.ok) {
-    if (response.status === 401) {
-      throw new Error(
-        "Brewfather API authentication failed. Check your User ID and API Key.",
-      );
-    }
     throw new Error(
-      `Brewfather API request failed with status: ${response.status}`,
+      `Brewfather API failed: ${response.status} ${response.statusText}`,
     );
   }
 
   return (await response.json()) as BrewfatherRecipe;
 }
 
-// 2. Format extracted ingredients into a clean, normalized string
-function formatRecipeSummary(recipe: BrewfatherRecipe): string {
-  const malts =
-    recipe.fermentables?.map((f) => `- ${f.name}: ${f.amount} kg`).join("\n") ||
-    "None";
+// 2. Playwright/Puppeteer Automation with Strict Network Security
+async function stageCartOnMaltMiller(
+  recipe: BrewfatherRecipe,
+  env: Env,
+): Promise<string[]> {
+  const browser = await puppeteer.launch(env.MYBROWSER);
+  const results: string[] = [];
 
-  const hops =
-    recipe.hops
-      ?.map((h) => `- ${h.name}: ${h.amount} g (${h.use || "Boil"})`)
-      .join("\n") || "None";
+  try {
+    const page = await browser.newPage();
 
-  const yeasts =
-    recipe.yeasts
-      ?.map((y) =>
-        `- ${y.laboratory || ""} ${y.name} (${y.productId || ""})`.trim(),
-      )
-      .join("\n") || "None";
+    // STRICT DOMAIN LOCKDOWN
+    // Drop any network requests NOT bound for The Malt Miller
+    const ALLOWED_DOMAINS = ["themaltmiller.co.uk", "www.themaltmiller.co.uk"];
 
-  return `
-                                                                                                                                  Recipe Name: ${recipe.name}
-                                                                                                                                  Recipe ID: ${recipe._id}
+    await page.setRequestInterception(true);
+    page.on("request", (interceptedRequest) => {
+      const requestUrl = new URL(interceptedRequest.url());
+      const isAllowed = ALLOWED_DOMAINS.some((domain) =>
+        requestUrl.hostname.endsWith(domain),
+      );
 
-                                                                                                                                  --- Fermentables ---
-                                                                                                                                  ${malts}
+      if (isAllowed) {
+        interceptedRequest.continue();
+      } else {
+        console.warn(
+          `[SECURITY BLOCK] Blocked request to: ${requestUrl.hostname}`,
+        );
+        interceptedRequest.abort("accessdenied");
+      }
+    });
 
-                                                                                                                                  --- Hops ---
-                                                                                                                                  ${hops}
+    // Set standard viewport & realistic User-Agent to prevent bot blocking
+    await page.setViewport({ width: 1280, height: 800 });
+    await page.setUserAgent(
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    );
 
-                                                                                                                                  --- Yeast ---
-                                                                                                                                  ${yeasts}
-                                                                                                                                    `.trim();
+    // Combine fermentables, hops, and yeast into a flat search list
+    const itemsToSearch = [
+      ...(recipe.fermentables || []).map((f) => ({
+        name: f.name,
+        qty: `${f.amount}kg`,
+      })),
+      ...(recipe.hops || []).map((h) => ({
+        name: h.name,
+        qty: `${h.amount}g`,
+      })),
+      ...(recipe.yeasts || []).map((y) => ({ name: y.name, qty: "1 pkt" })),
+    ];
+
+    for (const item of itemsToSearch) {
+      try {
+        // Navigate directly to search page for each ingredient
+        const searchUrl = `https://www.themaltmiller.co.uk/?s=${encodeURIComponent(item.name)}&post_type=product`;
+        await page.goto(searchUrl, {
+          waitUntil: "domcontentloaded",
+          timeout: 15000,
+        });
+
+        // Check if WooCommerce product results exist
+        const firstProductSelector =
+          ".products .product a.woocommerce-LoopProduct-link, article.product h2 a";
+        const hasProduct = await page.$(firstProductSelector);
+
+        if (hasProduct) {
+          // Click into the top matching product
+          await Promise.all([
+            page.waitForNavigation({
+              waitUntil: "domcontentloaded",
+              timeout: 15000,
+            }),
+            page.click(firstProductSelector),
+          ]);
+
+          // Attempt to locate and click 'Add to basket'
+          const addToCartBtn = "button.single_add_to_cart_button";
+          if (await page.$(addToCartBtn)) {
+            await page.click(addToCartBtn);
+            await page.waitForTimeout(1000); // Wait briefly for AJAX basket update
+            results.push(`✅ Added match for "${item.name}" (${item.qty})`);
+          } else {
+            results.push(
+              `⚠️ Found page for "${item.name}", but could not locate Add-To-Cart button.`,
+            );
+          }
+        } else {
+          results.push(`❌ No matching product found for "${item.name}".`);
+        }
+      } catch (err: any) {
+        results.push(`⚠️ Error processing "${item.name}": ${err.message}`);
+      }
+    }
+
+    return results;
+  } finally {
+    // Always close browser session to prevent daily 10-minute free allowance depletion
+    await browser.close();
+  }
 }
 
-// 3. Initialize the MCP Server
+// 3. Initialize MCP Server
 const server = new McpServer({
   name: "brewfather-maltmiller-automator",
   version: "1.0.0",
 });
 
-// Register the tool exposed to Gemini
+// Register Tool 1: Fetch & Preview Recipe
 server.tool(
   "get_brewfather_recipe",
-  "Fetches and extracts fermentables, hops, and yeast from a Brewfather recipe ID.",
-  {
-    recipeId: z.string().describe("The 28-character Brewfather Recipe ID"),
+  "Fetches fermentables, hops, and yeast from a Brewfather recipe ID.",
+  { recipeId: z.string().describe("The Brewfather Recipe ID") },
+  async ({ recipeId }, env: Env) => {
+    try {
+      const recipe = await fetchBrewfatherRecipe(
+        recipeId,
+        env.BREWFATHER_USER_ID,
+        env.BREWFATHER_API_KEY,
+      );
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(recipe, null, 2),
+          },
+        ],
+      };
+    } catch (err: any) {
+      return { content: [{ type: "text", text: `Error: ${err.message}` }] };
+    }
   },
+);
+
+// Register Tool 2: Order / Stage Ingredients to Cart
+server.tool(
+  "stage_malt_miller_cart",
+  "Fetches a Brewfather recipe and automatically adds matching ingredients to The Malt Miller cart.",
+  { recipeId: z.string().describe("The Brewfather Recipe ID") },
   async ({ recipeId }, env: Env) => {
     try {
       if (!env.BREWFATHER_USER_ID || !env.BREWFATHER_API_KEY) {
-        return {
-          content: [
-            {
-              type: "text",
-              text: "Error: BREWFATHER_USER_ID or BREWFATHER_API_KEY environment variables are not set in Cloudflare Secrets.",
-            },
-          ],
-        };
+        throw new Error(
+          "Missing Brewfather credentials in Cloudflare secrets.",
+        );
       }
 
       const recipe = await fetchBrewfatherRecipe(
@@ -137,45 +208,42 @@ server.tool(
         env.BREWFATHER_USER_ID,
         env.BREWFATHER_API_KEY,
       );
+      const executionLog = await stageCartOnMaltMiller(recipe, env);
 
-      const formattedData = formatRecipeSummary(recipe);
+      const summary = `
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              Staging complete for recipe "${recipe.name}"!
+
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              --- Execution Log ---
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              ${executionLog.join("\n")}
+
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              🛒 Open your cart to review item quantities and checkout:
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              https://www.themaltmiller.co.uk/basket/
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    `.trim();
 
       return {
-        content: [
-          {
-            type: "text",
-            text: formattedData,
-          },
-        ],
+        content: [{ type: "text", text: summary }],
       };
-    } catch (error: any) {
+    } catch (err: any) {
       return {
-        content: [
-          {
-            type: "text",
-            text: `Failed to fetch recipe: ${error.message}`,
-          },
-        ],
+        content: [{ type: "text", text: `Automation failed: ${err.message}` }],
       };
     }
   },
 );
 
-// 4. Export Cloudflare Worker HTTP handler (Streamable HTTP / MCP Entrypoint)
+// 4. Export Cloudflare Worker HTTP Handler
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url());
 
-    // Basic health check route
     if (url.pathname === "/" || url.pathname === "/health") {
-      return new Response("Brewfather MCP Server active", { status: 200 });
+      return new Response("Brewfather & Malt Miller MCP Server Running", {
+        status: 200,
+      });
     }
 
-    // MCP Transport over HTTP
     if (url.pathname === "/mcp" && request.method === "POST") {
-      // Connect request payload to the MCP Server instance
-      const response = await server.handleHttpMessage(request, env);
-      return response;
+      return await server.handleHttpMessage(request, env);
     }
 
     return new Response("Not Found", { status: 404 });
