@@ -1,7 +1,7 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "brewfather-mcp-worker",
-  "main": "src/index.ts",
+  "main": "index.ts",
   "compatibility_date": "2026-01-01",
   "compatibility_flags": ["nodejs_compat"],
   // Enable Cloudflare Browser Rendering API (Headless Chrome)
