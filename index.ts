@@ -1,4 +1,5 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { createMcpHandler } from "agents/mcp/server";
 import puppeteer from "@cloudflare/puppeteer";
 import { z } from "zod";
 
@@ -62,6 +63,15 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+// An item to search for on The Malt Miller, with the quantity we actually
+// want to end up in the basket (as a plain number, in the site's base unit
+// for that product type where possible).
+interface SearchItem {
+  name: string;
+  qty: string; // human-readable, e.g. "2.5kg", "50g", "1 pkt" — used in logs
+  desiredQuantity: number; // numeric quantity to set on the product page
+}
+
 // 2. Playwright/Puppeteer Automation with Strict Network Security
 async function stageCartOnMaltMiller(
   recipe: BrewfatherRecipe,
@@ -100,17 +110,25 @@ async function stageCartOnMaltMiller(
       "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     );
 
-    // Combine fermentables, hops, and yeast into a flat search list
-    const itemsToSearch = [
+    // Combine fermentables, hops, and yeast into a flat search list, carrying
+    // the numeric quantity through so we can set it on the product page
+    // rather than relying on the site's default (usually 1).
+    const itemsToSearch: SearchItem[] = [
       ...(recipe.fermentables || []).map((f) => ({
         name: f.name,
         qty: `${f.amount}kg`,
+        desiredQuantity: f.amount,
       })),
       ...(recipe.hops || []).map((h) => ({
         name: h.name,
         qty: `${h.amount}g`,
+        desiredQuantity: h.amount,
       })),
-      ...(recipe.yeasts || []).map((y) => ({ name: y.name, qty: "1 pkt" })),
+      ...(recipe.yeasts || []).map((y) => ({
+        name: y.name,
+        qty: "1 pkt",
+        desiredQuantity: 1,
+      })),
     ];
 
     for (const item of itemsToSearch) {
@@ -137,12 +155,45 @@ async function stageCartOnMaltMiller(
             page.click(firstProductSelector),
           ]);
 
+          // WooCommerce's standard quantity input on the single product page
+          const quantitySelector = "form.cart input.qty, input[name='quantity']";
+          const quantityField = await page.$(quantitySelector);
+          let quantityNote = "";
+
+          if (quantityField && item.desiredQuantity > 0) {
+            // Round to the nearest whole unit — most Malt Miller products
+            // are sold in whole packs/units, and fractional values are
+            // usually rejected by the input's step/min attributes.
+            const roundedQty = Math.max(1, Math.round(item.desiredQuantity));
+
+            await page.evaluate(
+              (selector, value) => {
+                const el = document.querySelector(selector) as HTMLInputElement | null;
+                if (el) {
+                  el.value = String(value);
+                  el.dispatchEvent(new Event("input", { bubbles: true }));
+                  el.dispatchEvent(new Event("change", { bubbles: true }));
+                }
+              },
+              quantitySelector,
+              roundedQty,
+            );
+
+            if (roundedQty !== item.desiredQuantity) {
+              quantityNote = ` (rounded to ${roundedQty} — check pack size against ${item.qty})`;
+            }
+          } else if (item.desiredQuantity > 0) {
+            quantityNote = " (quantity field not found — used site default)";
+          }
+
           // Attempt to locate and click 'Add to basket'
           const addToCartBtn = "button.single_add_to_cart_button";
           if (await page.$(addToCartBtn)) {
             await page.click(addToCartBtn);
             await delay(1000); // Wait briefly for AJAX basket update
-            results.push(`✅ Added match for "${item.name}" (${item.qty})`);
+            results.push(
+              `✅ Added match for "${item.name}" (${item.qty})${quantityNote}`,
+            );
           } else {
             results.push(
               `⚠️ Found page for "${item.name}", but could not locate Add-To-Cart button.`,
@@ -243,8 +294,13 @@ https://www.themaltmiller.co.uk/basket/
 }
 
 // 4. Export Cloudflare Worker HTTP Handler
+//
+// createMcpHandler wires up the Streamable HTTP transport for us and creates
+// a fresh McpServer per request internally when given a factory function —
+// the MCP SDK does not allow connecting an already-connected server to a new
+// transport, so we pass a factory rather than a pre-built instance.
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
 
     if (url.pathname === "/" || url.pathname === "/health") {
@@ -254,8 +310,7 @@ export default {
     }
 
     if (url.pathname === "/mcp" && request.method === "POST") {
-      const server = buildServer(env);
-      return await server.handleHttpMessage(request, env);
+      return await createMcpHandler(() => buildServer(env))(request, env, ctx);
     }
 
     return new Response("Not Found", { status: 404 });
