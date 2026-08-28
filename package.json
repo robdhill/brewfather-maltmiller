@@ -9,6 +9,7 @@
     "dependencies": {
         "@cloudflare/puppeteer": "^0.0.13",
         "@modelcontextprotocol/sdk": "^1.0.0",
+        "agents": "^0.20.0",
         "zod": "^3.22.4"
     },
     "devDependencies": {
