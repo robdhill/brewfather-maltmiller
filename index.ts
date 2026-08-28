@@ -1,4 +1,5 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { createLegacyMcpHandler } from "agents/mcp";
 import puppeteer from "@cloudflare/puppeteer";
 import { z } from "zod";
 
@@ -60,6 +61,15 @@ async function fetchBrewfatherRecipe(
 // Small helper since page.waitForTimeout was removed in newer Puppeteer versions
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// Extract the leading numeric quantity from strings like "1.5kg", "50g", "1 pkt".
+// Falls back to 1 if nothing parseable is found.
+function parseQuantity(qty: string): number {
+  const match = qty.match(/^([\d.]+)/);
+  if (!match) return 1;
+  const value = parseFloat(match[1]);
+  return Number.isFinite(value) && value > 0 ? value : 1;
 }
 
 // 2. Playwright/Puppeteer Automation with Strict Network Security
@@ -140,9 +150,36 @@ async function stageCartOnMaltMiller(
           // Attempt to locate and click 'Add to basket'
           const addToCartBtn = "button.single_add_to_cart_button";
           if (await page.$(addToCartBtn)) {
+            // Set the actual required quantity before adding to cart, instead
+            // of relying on the default quantity of 1.
+            const quantitySelector = 'input.qty, input[name="quantity"]';
+            const quantityInput = await page.$(quantitySelector);
+            const desiredQty = parseQuantity(item.qty);
+
+            if (quantityInput) {
+              await page.$eval(
+                quantitySelector,
+                (el, value) => {
+                  (el as HTMLInputElement).value = String(value);
+                  el.dispatchEvent(new Event("input", { bubbles: true }));
+                  el.dispatchEvent(new Event("change", { bubbles: true }));
+                },
+                desiredQty,
+              );
+            }
+
             await page.click(addToCartBtn);
             await delay(1000); // Wait briefly for AJAX basket update
-            results.push(`✅ Added match for "${item.name}" (${item.qty})`);
+
+            if (quantityInput) {
+              results.push(
+                `✅ Added match for "${item.name}" (qty set to ${desiredQty}, ${item.qty})`,
+              );
+            } else {
+              results.push(
+                `⚠️ Added match for "${item.name}" but no quantity field was found — added at default quantity instead of ${item.qty}.`,
+              );
+            }
           } else {
             results.push(
               `⚠️ Found page for "${item.name}", but could not locate Add-To-Cart button.`,
@@ -244,7 +281,7 @@ https://www.themaltmiller.co.uk/basket/
 
 // 4. Export Cloudflare Worker HTTP Handler
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
 
     if (url.pathname === "/" || url.pathname === "/health") {
@@ -255,7 +292,7 @@ export default {
 
     if (url.pathname === "/mcp" && request.method === "POST") {
       const server = buildServer(env);
-      return await server.handleHttpMessage(request, env);
+      return await createLegacyMcpHandler(server)(request, env, ctx);
     }
 
     return new Response("Not Found", { status: 404 });
