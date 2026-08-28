@@ -57,6 +57,11 @@ async function fetchBrewfatherRecipe(
   return (await response.json()) as BrewfatherRecipe;
 }
 
+// Small helper since page.waitForTimeout was removed in newer Puppeteer versions
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 // 2. Playwright/Puppeteer Automation with Strict Network Security
 async function stageCartOnMaltMiller(
   recipe: BrewfatherRecipe,
@@ -136,7 +141,7 @@ async function stageCartOnMaltMiller(
           const addToCartBtn = "button.single_add_to_cart_button";
           if (await page.$(addToCartBtn)) {
             await page.click(addToCartBtn);
-            await page.waitForTimeout(1000); // Wait briefly for AJAX basket update
+            await delay(1000); // Wait briefly for AJAX basket update
             results.push(`✅ Added match for "${item.name}" (${item.qty})`);
           } else {
             results.push(
@@ -158,83 +163,89 @@ async function stageCartOnMaltMiller(
   }
 }
 
-// 3. Initialize MCP Server
-const server = new McpServer({
-  name: "brewfather-maltmiller-automator",
-  version: "1.0.0",
-});
+// 3. Build the MCP server per-request, closing over the real `env`
+function buildServer(env: Env): McpServer {
+  const server = new McpServer({
+    name: "brewfather-maltmiller-automator",
+    version: "1.0.0",
+  });
 
-// Register Tool 1: Fetch & Preview Recipe
-server.tool(
-  "get_brewfather_recipe",
-  "Fetches fermentables, hops, and yeast from a Brewfather recipe ID.",
-  { recipeId: z.string().describe("The Brewfather Recipe ID") },
-  async ({ recipeId }, env: Env) => {
-    try {
-      const recipe = await fetchBrewfatherRecipe(
-        recipeId,
-        env.BREWFATHER_USER_ID,
-        env.BREWFATHER_API_KEY,
-      );
-      return {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify(recipe, null, 2),
-          },
-        ],
-      };
-    } catch (err: any) {
-      return { content: [{ type: "text", text: `Error: ${err.message}` }] };
-    }
-  },
-);
-
-// Register Tool 2: Order / Stage Ingredients to Cart
-server.tool(
-  "stage_malt_miller_cart",
-  "Fetches a Brewfather recipe and automatically adds matching ingredients to The Malt Miller cart.",
-  { recipeId: z.string().describe("The Brewfather Recipe ID") },
-  async ({ recipeId }, env: Env) => {
-    try {
-      if (!env.BREWFATHER_USER_ID || !env.BREWFATHER_API_KEY) {
-        throw new Error(
-          "Missing Brewfather credentials in Cloudflare secrets.",
+  // Register Tool 1: Fetch & Preview Recipe
+  server.tool(
+    "get_brewfather_recipe",
+    "Fetches fermentables, hops, and yeast from a Brewfather recipe ID.",
+    { recipeId: z.string().describe("The Brewfather Recipe ID") },
+    async ({ recipeId }) => {
+      try {
+        const recipe = await fetchBrewfatherRecipe(
+          recipeId,
+          env.BREWFATHER_USER_ID,
+          env.BREWFATHER_API_KEY,
         );
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(recipe, null, 2),
+            },
+          ],
+        };
+      } catch (err: any) {
+        return { content: [{ type: "text", text: `Error: ${err.message}` }] };
       }
+    },
+  );
 
-      const recipe = await fetchBrewfatherRecipe(
-        recipeId,
-        env.BREWFATHER_USER_ID,
-        env.BREWFATHER_API_KEY,
-      );
-      const executionLog = await stageCartOnMaltMiller(recipe, env);
+  // Register Tool 2: Order / Stage Ingredients to Cart
+  server.tool(
+    "stage_malt_miller_cart",
+    "Fetches a Brewfather recipe and automatically adds matching ingredients to The Malt Miller cart.",
+    { recipeId: z.string().describe("The Brewfather Recipe ID") },
+    async ({ recipeId }) => {
+      try {
+        if (!env.BREWFATHER_USER_ID || !env.BREWFATHER_API_KEY) {
+          throw new Error(
+            "Missing Brewfather credentials in Cloudflare secrets.",
+          );
+        }
 
-      const summary = `
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              Staging complete for recipe "${recipe.name}"!
+        const recipe = await fetchBrewfatherRecipe(
+          recipeId,
+          env.BREWFATHER_USER_ID,
+          env.BREWFATHER_API_KEY,
+        );
+        const executionLog = await stageCartOnMaltMiller(recipe, env);
 
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              --- Execution Log ---
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              ${executionLog.join("\n")}
+        const summary = `
+Staging complete for recipe "${recipe.name}"!
 
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              🛒 Open your cart to review item quantities and checkout:
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              https://www.themaltmiller.co.uk/basket/
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    `.trim();
+--- Execution Log ---
+${executionLog.join("\n")}
 
-      return {
-        content: [{ type: "text", text: summary }],
-      };
-    } catch (err: any) {
-      return {
-        content: [{ type: "text", text: `Automation failed: ${err.message}` }],
-      };
-    }
-  },
-);
+🛒 Open your cart to review item quantities and checkout:
+https://www.themaltmiller.co.uk/basket/
+        `.trim();
+
+        return {
+          content: [{ type: "text", text: summary }],
+        };
+      } catch (err: any) {
+        return {
+          content: [
+            { type: "text", text: `Automation failed: ${err.message}` },
+          ],
+        };
+      }
+    },
+  );
+
+  return server;
+}
 
 // 4. Export Cloudflare Worker HTTP Handler
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
-    const url = new URL(request.url());
+    const url = new URL(request.url);
 
     if (url.pathname === "/" || url.pathname === "/health") {
       return new Response("Brewfather & Malt Miller MCP Server Running", {
@@ -243,6 +254,7 @@ export default {
     }
 
     if (url.pathname === "/mcp" && request.method === "POST") {
+      const server = buildServer(env);
       return await server.handleHttpMessage(request, env);
     }
 
