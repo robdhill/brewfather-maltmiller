@@ -29,14 +29,14 @@ jobs:
       - name: Resolve dependencies (lockfile only, no install)
         run: npm install --package-lock-only
 
-      - name: Commit lockfile if changed
+      - name: Commit lockfile if changed or newly created
         run: |
-          if ! git diff --quiet -- package-lock.json; then
+          git add package-lock.json
+          if git diff --cached --quiet; then
+            echo "package-lock.json already up to date, nothing to commit."
+          else
             git config user.name "github-actions[bot]"
             git config user.email "github-actions[bot]@users.noreply.github.com"
-            git add package-lock.json
             git commit -m "chore: generate package-lock.json [skip ci]"
             git push origin HEAD:${{ github.head_ref || github.ref_name }}
-          else
-            echo "package-lock.json already up to date, nothing to commit."
           fi
