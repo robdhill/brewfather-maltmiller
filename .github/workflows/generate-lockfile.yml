@@ -1,0 +1,42 @@
+name: Generate package-lock.json
+
+on:
+  push:
+    branches:
+      - feature/github-mcp-proxy
+    paths:
+      - "package.json"
+      - ".github/workflows/generate-lockfile.yml"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  lockfile:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref || github.ref_name }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Resolve dependencies (lockfile only, no install)
+        run: npm install --package-lock-only
+
+      - name: Commit lockfile if changed or newly created
+        run: |
+          git add package-lock.json
+          if git diff --cached --quiet; then
+            echo "package-lock.json already up to date, nothing to commit."
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git commit -m "chore: generate package-lock.json [skip ci]"
+            git push origin HEAD:${{ github.head_ref || github.ref_name }}
+          fi
