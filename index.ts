@@ -2,11 +2,16 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { createMcpHandler } from "agents/mcp/server";
 import puppeteer from "@cloudflare/puppeteer";
 import { z } from "zod";
+import { githubProxyProvider } from "./github-proxy/provider";
 
 export interface Env {
   BREWFATHER_USER_ID: string;
   BREWFATHER_API_KEY: string;
   MYBROWSER: Fetcher; // Cloudflare Puppeteer binding defined in wrangler.jsonc
+  GITHUB_PROXY_PAT: string; // fine-grained GitHub PAT, set via wrangler secret
+  GITHUB_OAUTH_CLIENT_ID: string; // from your existing GitHub OAuth App
+  GITHUB_OAUTH_CLIENT_SECRET: string; // from the same GitHub OAuth App
+  ALLOWED_GITHUB_USERNAME: string; // only this GitHub login may complete /gh-proxy login
 }
 
 interface Fermentable {
@@ -300,8 +305,20 @@ https://www.themaltmiller.co.uk/basket/
 // the MCP SDK does not allow connecting an already-connected server to a new
 // transport, so we pass a factory rather than a pre-built instance.
 export default {
-  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+  async fetch(
+    request: Request,
+    env: Env,
+    ctx: ExecutionContext,
+  ): Promise<Response> {
     const url = new URL(request.url);
+
+    // GitHub MCP proxy: OAuth-fronted server that relays to GitHub's real
+    // remote MCP server using a fine-grained PAT held server-side. See
+    // github-proxy/provider.ts for the OAuth + tool-filtering setup, and
+    // github-proxy/oauth-handler.ts for the "Sign in with GitHub" login.
+    if (url.pathname.startsWith("/gh-proxy")) {
+      return await githubProxyProvider.fetch(request, env, ctx);
+    }
 
     if (url.pathname === "/" || url.pathname === "/health") {
       return new Response("Brewfather & Malt Miller MCP Server Running", {

@@ -7,5 +7,13 @@
   // Enable Cloudflare Browser Rendering API (Headless Chrome)
   "browser": {
     "binding": "MYBROWSER"
-  }
+  },
+  // Required by @cloudflare/workers-oauth-provider to store OAuth grants,
+  // tokens, and registered client metadata for the /gh-proxy/* routes.
+  "kv_namespaces": [
+    {
+      "binding": "OAUTH_KV",
+      "id": "d56dd51242984535ba9d0df145a65007"
+    }
+  ]
 }
