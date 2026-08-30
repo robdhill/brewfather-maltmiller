@@ -1,11 +1,14 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import puppeteer from "@cloudflare/puppeteer";
 import { z } from "zod";
+import { githubProxyProvider } from "./github-proxy/provider";
 
 export interface Env {
   BREWFATHER_USER_ID: string;
   BREWFATHER_API_KEY: string;
   MYBROWSER: Fetcher; // Cloudflare Puppeteer binding defined in wrangler.jsonc
+  GITHUB_PROXY_PAT: string; // fine-grained GitHub PAT, set via wrangler secret
+  GH_PROXY_LOGIN_PASSWORD: string; // shared password gating /gh-proxy/authorize
 }
 
 interface Fermentable {
@@ -244,8 +247,19 @@ https://www.themaltmiller.co.uk/basket/
 
 // 4. Export Cloudflare Worker HTTP Handler
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(
+    request: Request,
+    env: Env,
+    ctx: ExecutionContext,
+  ): Promise<Response> {
     const url = new URL(request.url);
+
+    // GitHub MCP proxy: OAuth-fronted server that relays to GitHub's real
+    // remote MCP server using a fine-grained PAT held server-side. See
+    // github-proxy/provider.ts for the OAuth + tool-filtering setup.
+    if (url.pathname.startsWith("/gh-proxy")) {
+      return await githubProxyProvider.fetch(request, env, ctx);
+    }
 
     if (url.pathname === "/" || url.pathname === "/health") {
       return new Response("Brewfather & Malt Miller MCP Server Running", {
