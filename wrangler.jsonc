@@ -10,17 +10,10 @@
   },
   // Required by @cloudflare/workers-oauth-provider to store OAuth grants,
   // tokens, and registered client metadata for the /gh-proxy/* routes.
-  //
-  // This namespace does not exist yet and needs to be created once before
-  // deploying this branch. Easiest way without local tooling: Cloudflare
-  // dashboard -> Workers & Pages -> KV -> Create namespace (call it
-  // something like "brewfather-mcp-worker-oauth"), then paste its id below
-  // in place of "REPLACE_WITH_KV_NAMESPACE_ID". Alternatively, from a
-  // Codespace/Gitpod terminal: `wrangler kv namespace create OAUTH_KV`.
   "kv_namespaces": [
     {
       "binding": "OAUTH_KV",
-      "id": "REPLACE_WITH_KV_NAMESPACE_ID"
+      "id": "d56dd51242984535ba9d0df145a65007"
     }
   ]
 }
