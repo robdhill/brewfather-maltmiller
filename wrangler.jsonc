@@ -7,5 +7,17 @@
   // Enable Cloudflare Browser Rendering API (Headless Chrome)
   "browser": {
     "binding": "MYBROWSER"
-  }
+  },
+  // Required by @cloudflare/workers-oauth-provider to store OAuth client
+  // registrations, grants, and token hashes for the /github-proxy/* route.
+  //
+  // Create this namespace before deploying:
+  //   wrangler kv namespace create OAUTH_KV
+  // then replace REPLACE_WITH_YOUR_KV_NAMESPACE_ID below with the id it prints.
+  "kv_namespaces": [
+    {
+      "binding": "OAUTH_KV",
+      "id": "REPLACE_WITH_YOUR_KV_NAMESPACE_ID"
+    }
+  ]
 }
