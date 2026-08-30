@@ -8,7 +8,9 @@ export interface Env {
   BREWFATHER_API_KEY: string;
   MYBROWSER: Fetcher; // Cloudflare Puppeteer binding defined in wrangler.jsonc
   GITHUB_PROXY_PAT: string; // fine-grained GitHub PAT, set via wrangler secret
-  GH_PROXY_LOGIN_PASSWORD: string; // shared password gating /gh-proxy/authorize
+  GITHUB_OAUTH_CLIENT_ID: string; // from your existing GitHub OAuth App
+  GITHUB_OAUTH_CLIENT_SECRET: string; // from the same GitHub OAuth App
+  ALLOWED_GITHUB_USERNAME: string; // only this GitHub login may complete /gh-proxy login
 }
 
 interface Fermentable {
@@ -256,7 +258,8 @@ export default {
 
     // GitHub MCP proxy: OAuth-fronted server that relays to GitHub's real
     // remote MCP server using a fine-grained PAT held server-side. See
-    // github-proxy/provider.ts for the OAuth + tool-filtering setup.
+    // github-proxy/provider.ts for the OAuth + tool-filtering setup, and
+    // github-proxy/oauth-handler.ts for the "Sign in with GitHub" login.
     if (url.pathname.startsWith("/gh-proxy")) {
       return await githubProxyProvider.fetch(request, env, ctx);
     }
