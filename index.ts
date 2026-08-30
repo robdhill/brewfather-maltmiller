@@ -312,11 +312,36 @@ export default {
   ): Promise<Response> {
     const url = new URL(request.url);
 
+    // Root-level aliases for OAuth default paths (RFC 8414 fallback
+    // behavior). Some MCP clients construct /authorize, /token, and
+    // /register directly against the server origin instead of reading the
+    // exact paths out of discovery metadata. Rewrite those onto the real
+    // /gh-proxy/ routes that OAuthProvider actually owns.
+    const OAUTH_ROOT_ALIASES: Record<string, string> = {
+      "/authorize": "/gh-proxy/authorize",
+      "/token": "/gh-proxy/token",
+      "/register": "/gh-proxy/register",
+    };
+    if (url.pathname in OAUTH_ROOT_ALIASES) {
+      url.pathname = OAUTH_ROOT_ALIASES[url.pathname];
+      request = new Request(url.toString(), request);
+    }
+
     // GitHub MCP proxy: OAuth-fronted server that relays to GitHub's real
     // remote MCP server using a fine-grained PAT held server-side. See
     // github-proxy/provider.ts for the OAuth + tool-filtering setup, and
     // github-proxy/oauth-handler.ts for the "Sign in with GitHub" login.
-    if (url.pathname.startsWith("/gh-proxy")) {
+    //
+    // OAuthProvider (@cloudflare/workers-oauth-provider) also serves RFC
+    // 8414 / RFC 9728 discovery metadata at /.well-known/oauth-*, always at
+    // the domain root regardless of the configured authorizeEndpoint /
+    // tokenEndpoint paths — so those requests must be routed here too,
+    // alongside the real /gh-proxy/* traffic, or they 404 before ever
+    // reaching the library.
+    if (
+      url.pathname.startsWith("/gh-proxy") ||
+      url.pathname.startsWith("/.well-known/oauth-")
+    ) {
       return await githubProxyProvider.fetch(request, env, ctx);
     }
 
