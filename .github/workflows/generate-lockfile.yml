@@ -2,8 +2,8 @@ name: Generate package-lock.json
 
 on:
   push:
-    branches:
-      - fix/mcp-handler-and-quantities
+    branches-ignore:
+      - main
     paths:
       - "package.json"
       - ".github/workflows/generate-lockfile.yml"
