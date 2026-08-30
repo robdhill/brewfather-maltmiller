@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - feature/github-mcp-proxy
+      - fix/mcp-handler-and-quantities
     paths:
       - "package.json"
       - ".github/workflows/generate-lockfile.yml"
