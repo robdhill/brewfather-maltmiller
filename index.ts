@@ -1,9 +1,12 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { createMcpHandler } from "agents/mcp/server";
+import { OAuthProvider } from "@cloudflare/workers-oauth-provider";
 import puppeteer from "@cloudflare/puppeteer";
 import { z } from "zod";
+import { buildGithubProxyServer, type GithubProxyEnv } from "./github-proxy";
+import { handleAuthorizeRequest, type AuthEnv } from "./github-proxy-auth";
 
-export interface Env {
+export interface Env extends GithubProxyEnv, AuthEnv {
   BREWFATHER_USER_ID: string;
   BREWFATHER_API_KEY: string;
   MYBROWSER: Fetcher; // Cloudflare Puppeteer binding defined in wrangler.jsonc
@@ -293,26 +296,63 @@ https://www.themaltmiller.co.uk/basket/
   return server;
 }
 
-// 4. Export Cloudflare Worker HTTP Handler
+// 4. Original Brewfather/Malt Miller routes — unchanged, just pulled out into
+// a named function so the new OAuth-wrapped default export (below) can
+// delegate to it for every request that isn't part of the GitHub proxy.
+async function handleBrewfatherRequest(
+  request: Request,
+  env: Env,
+  ctx: ExecutionContext,
+): Promise<Response> {
+  const url = new URL(request.url);
+
+  if (url.pathname === "/" || url.pathname === "/health") {
+    return new Response("Brewfather & Malt Miller MCP Server Running", {
+      status: 200,
+    });
+  }
+
+  if (url.pathname === "/mcp" && request.method === "POST") {
+    return await createMcpHandler(() => buildServer(env))(request, env, ctx);
+  }
+
+  return new Response("Not Found", { status: 404 });
+}
+
+// 5. GitHub remote MCP proxy — a second, independent MCP endpoint on this
+// same Worker at /github-proxy/mcp. It's OAuth-protected so it can be added
+// as a Claude.ai custom connector (which only supports a URL + OAuth, not a
+// static header), while internally it authenticates to GitHub's real remote
+// MCP server with a fine-grained PAT held as a Worker secret.
 //
-// createMcpHandler wires up the Streamable HTTP transport for us and creates
-// a fresh McpServer per request internally when given a factory function —
-// the MCP SDK does not allow connecting an already-connected server to a new
-// transport, so we pass a factory rather than a pre-built instance.
-export default {
-  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+// Requires, before this will actually run:
+//   - A KV namespace bound as OAUTH_KV (see wrangler.jsonc)
+//   - wrangler secret put GITHUB_PROXY_PAT
+//   - wrangler secret put PROXY_APPROVAL_PASSPHRASE
+const defaultHandler = {
+  async fetch(
+    request: Request,
+    env: Env,
+    ctx: ExecutionContext,
+  ): Promise<Response> {
     const url = new URL(request.url);
 
-    if (url.pathname === "/" || url.pathname === "/health") {
-      return new Response("Brewfather & Malt Miller MCP Server Running", {
-        status: 200,
-      });
+    if (url.pathname === "/github-proxy/authorize") {
+      return handleAuthorizeRequest(request, env);
     }
 
-    if (url.pathname === "/mcp" && request.method === "POST") {
-      return await createMcpHandler(() => buildServer(env))(request, env, ctx);
-    }
-
-    return new Response("Not Found", { status: 404 });
+    return handleBrewfatherRequest(request, env, ctx);
   },
 };
+
+export default new OAuthProvider({
+  apiRoute: "/github-proxy/mcp",
+  apiHandler: {
+    fetch: (request: Request, env: Env, ctx: ExecutionContext) =>
+      createMcpHandler(() => buildGithubProxyServer(env))(request, env, ctx),
+  },
+  defaultHandler,
+  authorizeEndpoint: "/github-proxy/authorize",
+  tokenEndpoint: "/github-proxy/token",
+  clientRegistrationEndpoint: "/github-proxy/register",
+});
