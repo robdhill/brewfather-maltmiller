@@ -15,5 +15,11 @@
       "binding": "OAUTH_KV",
       "id": "d56dd51242984535ba9d0df145a65007"
     }
-  ]
+  ],
+  "observability": {
+    "logs": {
+      "enabled": false,
+      "invocation_logs": true
+    }
+  }
 }
