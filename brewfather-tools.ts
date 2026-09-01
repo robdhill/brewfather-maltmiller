@@ -28,6 +28,14 @@ interface BrewfatherRecipe {
   yeasts: Yeast[];
 }
 
+interface BrewfatherBatch {
+  _id: string;
+  name: string;
+  batchNo?: number;
+  status: string;
+  recipe: BrewfatherRecipe;
+}
+
 async function fetchBrewfatherRecipe(
   recipeId: string,
   userId: string,
@@ -52,6 +60,55 @@ async function fetchBrewfatherRecipe(
   }
 
   return (await response.json()) as BrewfatherRecipe;
+}
+
+async function fetchPendingBatches(
+  userId: string,
+  apiKey: string,
+): Promise<BrewfatherBatch[]> {
+  const credentials = btoa(`${userId}:${apiKey}`);
+  const response = await fetch(
+    `https://api.brewfather.app/v2/batches?status=Planning&complete=True&limit=50`,
+    {
+      method: "GET",
+      headers: {
+        Authorization: `Basic ${credentials}`,
+        "Content-Type": "application/json",
+      },
+    },
+  );
+
+  if (!response.ok) {
+    throw new Error(
+      `Brewfather API failed: ${response.status} ${response.statusText}`,
+    );
+  }
+
+  return (await response.json()) as BrewfatherBatch[];
+}
+
+function findBatchesByRecipeName(
+  batches: BrewfatherBatch[],
+  recipeName: string,
+): BrewfatherBatch[] {
+  const needle = recipeName.trim().toLowerCase();
+  return batches.filter((b) =>
+    (b.recipe?.name ?? "").toLowerCase().includes(needle),
+  );
+}
+
+function formatIngredients(recipe: BrewfatherRecipe): string {
+  const fermentables =
+    (recipe.fermentables || [])
+      .map((f) => `- ${f.name}: ${f.amount}kg`)
+      .join("\n") || "  (none)";
+  const hops =
+    (recipe.hops || []).map((h) => `- ${h.name}: ${h.amount}g`).join("\n") ||
+    "  (none)";
+  const yeasts =
+    (recipe.yeasts || []).map((y) => `- ${y.name}`).join("\n") || "  (none)";
+
+  return `Fermentables:\n${fermentables}\n\nHops:\n${hops}\n\nYeast:\n${yeasts}`;
 }
 
 function delay(ms: number): Promise<void> {
@@ -221,6 +278,22 @@ export const LOCAL_TOOLS = [
       required: ["recipeId"],
     },
   },
+  {
+    name: "find_pending_batch_by_recipe_name",
+    description:
+      "Finds a pending (Planning status) Brewfather batch by recipe name and lists its ingredients. Returns the recipeId so it can be passed to stage_malt_miller_cart to order the ingredients.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        recipeName: {
+          type: "string",
+          description:
+            "The recipe name to search for among pending batches (case-insensitive, partial match).",
+        },
+      },
+      required: ["recipeName"],
+    },
+  },
 ] as const;
 
 const LOCAL_TOOL_NAMES = new Set(LOCAL_TOOLS.map((t) => t.name));
@@ -283,6 +356,75 @@ https://www.themaltmiller.co.uk/basket/
     } catch (err: any) {
       return {
         content: [{ type: "text", text: `Automation failed: ${err.message}` }],
+        isError: true,
+      };
+    }
+  }
+
+  if (name === "find_pending_batch_by_recipe_name") {
+    try {
+      if (!env.BREWFATHER_USER_ID || !env.BREWFATHER_API_KEY) {
+        throw new Error(
+          "Missing Brewfather credentials in Cloudflare secrets.",
+        );
+      }
+
+      const recipeName = String(args?.recipeName ?? "").trim();
+      if (!recipeName) {
+        throw new Error("recipeName is required");
+      }
+
+      const batches = await fetchPendingBatches(
+        env.BREWFATHER_USER_ID,
+        env.BREWFATHER_API_KEY,
+      );
+      const matches = findBatchesByRecipeName(batches, recipeName);
+
+      if (matches.length === 0) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `No pending (Planning) batches found matching recipe name "${recipeName}".`,
+            },
+          ],
+          isError: true,
+        };
+      }
+
+      if (matches.length > 1) {
+        const list = matches
+          .map(
+            (b) =>
+              `- "${b.name}" (batch #${b.batchNo ?? "?"}, recipe: "${b.recipe.name}", recipeId: ${b.recipe._id})`,
+          )
+          .join("\n");
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Multiple pending batches matched "${recipeName}":\n${list}\n\nPlease specify more precisely, or pass one of the recipeIds above to stage_malt_miller_cart.`,
+            },
+          ],
+        };
+      }
+
+      const batch = matches[0];
+      const recipe = batch.recipe;
+
+      const summary = `
+Pending batch found: "${batch.name}" (Batch #${batch.batchNo ?? "?"}, status: ${batch.status})
+Recipe: "${recipe.name}" (recipeId: ${recipe._id})
+
+${formatIngredients(recipe)}
+
+To order these ingredients on The Malt Miller, call stage_malt_miller_cart with recipeId "${recipe._id}".
+      `.trim();
+
+      return { content: [{ type: "text", text: summary }] };
+    } catch (err: any) {
+      return {
+        content: [{ type: "text", text: `Error: ${err.message}` }],
         isError: true,
       };
     }
