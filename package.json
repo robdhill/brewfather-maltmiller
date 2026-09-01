@@ -8,7 +8,7 @@
     },
     "dependencies": {
         "@cloudflare/puppeteer": "^1.4.0",
-        "@cloudflare/workers-oauth-provider": "^0.0.5",
+        "@cloudflare/workers-oauth-provider": "^0.10.3",
         "@modelcontextprotocol/sdk": "^1.0.0",
         "agents": "^0.20.0",
         "zod": "^4.0.0"
