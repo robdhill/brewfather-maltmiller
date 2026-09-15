@@ -126,6 +126,41 @@ const PRODUCT_PAGE_SELECTOR =
 const SEARCH_RESULTS_SELECTOR =
   ".products .product a.woocommerce-LoopProduct-link, article.product h2 a";
 
+// Common markers for bot-protection / challenge pages (Cloudflare, etc.)
+// that would explain a uniform failure across every search, regardless of
+// whether the underlying product actually exists.
+const BOT_PROTECTION_PATTERN =
+  /just a moment|checking your browser|attention required|enable javascript and cookies|verify you are human|cf-browser-verification|__cf_chl/i;
+
+async function diagnosePage(page: any): Promise<{
+  url: string;
+  title: string;
+  snippet: string;
+  looksBlocked: boolean;
+}> {
+  const url = page.url();
+  let title = "";
+  let snippet = "";
+
+  try {
+    title = await page.title();
+  } catch {
+    // ignore — title read can fail on odd pages
+  }
+
+  try {
+    snippet = await page.evaluate(() =>
+      (document.body?.innerText || "").replace(/\s+/g, " ").slice(0, 200),
+    );
+  } catch {
+    // ignore — evaluate can fail if page navigated away
+  }
+
+  const looksBlocked = BOT_PROTECTION_PATTERN.test(`${title} ${snippet}`);
+
+  return { url, title, snippet, looksBlocked };
+}
+
 async function stageCartOnMaltMiller(
   recipe: BrewfatherRecipe,
   env: BrewfatherEnv,
@@ -245,12 +280,18 @@ async function stageCartOnMaltMiller(
               `✅ Added match for "${item.name}" (${item.qty})${quantityNote}`,
             );
           } else {
+            const diag = await diagnosePage(page);
             results.push(
-              `⚠️ Found page for "${item.name}", but could not locate Add-To-Cart button.`,
+              `⚠️ Found page for "${item.name}", but could not locate Add-To-Cart button. ` +
+                `[debug url=${diag.url} title="${diag.title}"${diag.looksBlocked ? " BOT-PROTECTION-SUSPECTED" : ""} snippet="${diag.snippet}"]`,
             );
           }
         } else {
-          results.push(`❌ No matching product found for "${item.name}".`);
+          const diag = await diagnosePage(page);
+          results.push(
+            `❌ No matching product found for "${item.name}". ` +
+              `[debug url=${diag.url} title="${diag.title}"${diag.looksBlocked ? " BOT-PROTECTION-SUSPECTED" : ""} snippet="${diag.snippet}"]`,
+          );
         }
       } catch (err: any) {
         results.push(`⚠️ Error processing "${item.name}": ${err.message}`);
