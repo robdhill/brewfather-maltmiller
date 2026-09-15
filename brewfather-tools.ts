@@ -121,6 +121,11 @@ interface SearchItem {
   desiredQuantity: number;
 }
 
+const PRODUCT_PAGE_SELECTOR =
+  "form.cart, button.single_add_to_cart_button, input[name='quantity']";
+const SEARCH_RESULTS_SELECTOR =
+  ".products .product a.woocommerce-LoopProduct-link, article.product h2 a";
+
 async function stageCartOnMaltMiller(
   recipe: BrewfatherRecipe,
   env: BrewfatherEnv,
@@ -181,19 +186,30 @@ async function stageCartOnMaltMiller(
           timeout: 15000,
         });
 
-        const firstProductSelector =
-          ".products .product a.woocommerce-LoopProduct-link, article.product h2 a";
-        const hasProduct = await page.$(firstProductSelector);
+        // WooCommerce sometimes redirects a search straight to a single
+        // best-match product page instead of showing a results grid
+        // (e.g. when there's one strong match). Detect that case first,
+        // since the grid selector below will never match on a product page.
+        const alreadyOnProductPage = await page.$(PRODUCT_PAGE_SELECTOR);
 
-        if (hasProduct) {
-          await Promise.all([
-            page.waitForNavigation({
-              waitUntil: "domcontentloaded",
-              timeout: 15000,
-            }),
-            page.click(firstProductSelector),
-          ]);
+        let onProductPage = Boolean(alreadyOnProductPage);
 
+        if (!onProductPage) {
+          const hasSearchResult = await page.$(SEARCH_RESULTS_SELECTOR);
+
+          if (hasSearchResult) {
+            await Promise.all([
+              page.waitForNavigation({
+                waitUntil: "domcontentloaded",
+                timeout: 15000,
+              }),
+              page.click(SEARCH_RESULTS_SELECTOR),
+            ]);
+            onProductPage = Boolean(await page.$(PRODUCT_PAGE_SELECTOR));
+          }
+        }
+
+        if (onProductPage) {
           const quantitySelector = "form.cart input.qty, input[name='quantity']";
           const quantityField = await page.$(quantitySelector);
           let quantityNote = "";
