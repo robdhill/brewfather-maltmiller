@@ -1,9 +1,6 @@
-import puppeteer from "@cloudflare/puppeteer";
-
 export interface BrewfatherEnv {
   BREWFATHER_USER_ID: string;
   BREWFATHER_API_KEY: string;
-  MYBROWSER: Fetcher; // Cloudflare Puppeteer binding defined in wrangler.jsonc
 }
 
 interface Fermentable {
@@ -111,197 +108,50 @@ function formatIngredients(recipe: BrewfatherRecipe): string {
   return `Fermentables:\n${fermentables}\n\nHops:\n${hops}\n\nYeast:\n${yeasts}`;
 }
 
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-interface SearchItem {
+interface ShoppingLinkItem {
   name: string;
   qty: string;
-  desiredQuantity: number;
+  searchUrl: string;
 }
 
-const PRODUCT_PAGE_SELECTOR =
-  "form.cart, button.single_add_to_cart_button, input[name='quantity']";
-const SEARCH_RESULTS_SELECTOR =
-  ".products .product a.woocommerce-LoopProduct-link, article.product h2 a";
+/**
+ * NOTE: Automated cart-filling via a headless browser was tried and
+ * abandoned — The Malt Miller sits behind Cloudflare bot-protection,
+ * which challenges every headless session before it can reach real
+ * search results (see PR #24 for the diagnostic evidence). Rather than
+ * attempt to defeat that protection, this generates one direct search
+ * link per ingredient for the person to open and add to their cart
+ * themselves. This also avoids needing any Malt Miller account/API
+ * credentials at all — the flow never touches login, payment, or
+ * checkout in any way.
+ */
+function buildShoppingLinks(recipe: BrewfatherRecipe): ShoppingLinkItem[] {
+  const items: { name: string; qty: string }[] = [
+    ...(recipe.fermentables || []).map((f) => ({
+      name: f.name,
+      qty: `${f.amount}kg`,
+    })),
+    ...(recipe.hops || []).map((h) => ({
+      name: h.name,
+      qty: `${h.amount}g`,
+    })),
+    ...(recipe.yeasts || []).map((y) => ({
+      name: y.name,
+      qty: "1 pkt",
+    })),
+  ];
 
-// Common markers for bot-protection / challenge pages (Cloudflare, etc.)
-// that would explain a uniform failure across every search, regardless of
-// whether the underlying product actually exists.
-const BOT_PROTECTION_PATTERN =
-  /just a moment|checking your browser|attention required|enable javascript and cookies|verify you are human|cf-browser-verification|__cf_chl/i;
-
-async function diagnosePage(page: any): Promise<{
-  url: string;
-  title: string;
-  snippet: string;
-  looksBlocked: boolean;
-}> {
-  const url = page.url();
-  let title = "";
-  let snippet = "";
-
-  try {
-    title = await page.title();
-  } catch {
-    // ignore — title read can fail on odd pages
-  }
-
-  try {
-    snippet = await page.evaluate(() =>
-      (document.body?.innerText || "").replace(/\s+/g, " ").slice(0, 200),
-    );
-  } catch {
-    // ignore — evaluate can fail if page navigated away
-  }
-
-  const looksBlocked = BOT_PROTECTION_PATTERN.test(`${title} ${snippet}`);
-
-  return { url, title, snippet, looksBlocked };
+  return items.map((item) => ({
+    ...item,
+    searchUrl: `https://www.themaltmiller.co.uk/?s=${encodeURIComponent(item.name)}&post_type=product`,
+  }));
 }
 
-async function stageCartOnMaltMiller(
-  recipe: BrewfatherRecipe,
-  env: BrewfatherEnv,
-): Promise<string[]> {
-  const browser = await puppeteer.launch(env.MYBROWSER);
-  const results: string[] = [];
-
-  try {
-    const page = await browser.newPage();
-
-    const ALLOWED_DOMAINS = ["themaltmiller.co.uk", "www.themaltmiller.co.uk"];
-
-    await page.setRequestInterception(true);
-    page.on("request", (interceptedRequest) => {
-      const requestUrl = new URL(interceptedRequest.url());
-      const isAllowed = ALLOWED_DOMAINS.some((domain) =>
-        requestUrl.hostname.endsWith(domain),
-      );
-
-      if (isAllowed) {
-        interceptedRequest.continue();
-      } else {
-        console.warn(
-          `[SECURITY BLOCK] Blocked request to: ${requestUrl.hostname}`,
-        );
-        interceptedRequest.abort("accessdenied");
-      }
-    });
-
-    await page.setViewport({ width: 1280, height: 800 });
-    await page.setUserAgent(
-      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    );
-
-    const itemsToSearch: SearchItem[] = [
-      ...(recipe.fermentables || []).map((f) => ({
-        name: f.name,
-        qty: `${f.amount}kg`,
-        desiredQuantity: f.amount,
-      })),
-      ...(recipe.hops || []).map((h) => ({
-        name: h.name,
-        qty: `${h.amount}g`,
-        desiredQuantity: h.amount,
-      })),
-      ...(recipe.yeasts || []).map((y) => ({
-        name: y.name,
-        qty: "1 pkt",
-        desiredQuantity: 1,
-      })),
-    ];
-
-    for (const item of itemsToSearch) {
-      try {
-        const searchUrl = `https://www.themaltmiller.co.uk/?s=${encodeURIComponent(item.name)}&post_type=product`;
-        await page.goto(searchUrl, {
-          waitUntil: "domcontentloaded",
-          timeout: 15000,
-        });
-
-        // WooCommerce sometimes redirects a search straight to a single
-        // best-match product page instead of showing a results grid
-        // (e.g. when there's one strong match). Detect that case first,
-        // since the grid selector below will never match on a product page.
-        const alreadyOnProductPage = await page.$(PRODUCT_PAGE_SELECTOR);
-
-        let onProductPage = Boolean(alreadyOnProductPage);
-
-        if (!onProductPage) {
-          const hasSearchResult = await page.$(SEARCH_RESULTS_SELECTOR);
-
-          if (hasSearchResult) {
-            await Promise.all([
-              page.waitForNavigation({
-                waitUntil: "domcontentloaded",
-                timeout: 15000,
-              }),
-              page.click(SEARCH_RESULTS_SELECTOR),
-            ]);
-            onProductPage = Boolean(await page.$(PRODUCT_PAGE_SELECTOR));
-          }
-        }
-
-        if (onProductPage) {
-          const quantitySelector = "form.cart input.qty, input[name='quantity']";
-          const quantityField = await page.$(quantitySelector);
-          let quantityNote = "";
-
-          if (quantityField && item.desiredQuantity > 0) {
-            const roundedQty = Math.max(1, Math.round(item.desiredQuantity));
-
-            await page.evaluate(
-              (selector, value) => {
-                const el = document.querySelector(selector) as HTMLInputElement | null;
-                if (el) {
-                  el.value = String(value);
-                  el.dispatchEvent(new Event("input", { bubbles: true }));
-                  el.dispatchEvent(new Event("change", { bubbles: true }));
-                }
-              },
-              quantitySelector,
-              roundedQty,
-            );
-
-            if (roundedQty !== item.desiredQuantity) {
-              quantityNote = ` (rounded to ${roundedQty} — check pack size against ${item.qty})`;
-            }
-          } else if (item.desiredQuantity > 0) {
-            quantityNote = " (quantity field not found — used site default)";
-          }
-
-          const addToCartBtn = "button.single_add_to_cart_button";
-          if (await page.$(addToCartBtn)) {
-            await page.click(addToCartBtn);
-            await delay(1000);
-            results.push(
-              `✅ Added match for "${item.name}" (${item.qty})${quantityNote}`,
-            );
-          } else {
-            const diag = await diagnosePage(page);
-            results.push(
-              `⚠️ Found page for "${item.name}", but could not locate Add-To-Cart button. ` +
-                `[debug url=${diag.url} title="${diag.title}"${diag.looksBlocked ? " BOT-PROTECTION-SUSPECTED" : ""} snippet="${diag.snippet}"]`,
-            );
-          }
-        } else {
-          const diag = await diagnosePage(page);
-          results.push(
-            `❌ No matching product found for "${item.name}". ` +
-              `[debug url=${diag.url} title="${diag.title}"${diag.looksBlocked ? " BOT-PROTECTION-SUSPECTED" : ""} snippet="${diag.snippet}"]`,
-          );
-        }
-      } catch (err: any) {
-        results.push(`⚠️ Error processing "${item.name}": ${err.message}`);
-      }
-    }
-
-    return results;
-  } finally {
-    await browser.close();
-  }
+function formatShoppingList(recipe: BrewfatherRecipe): string {
+  const links = buildShoppingLinks(recipe);
+  return links
+    .map((item) => `- ${item.name} (${item.qty}): ${item.searchUrl}`)
+    .join("\n");
 }
 
 export const LOCAL_TOOLS = [
@@ -323,7 +173,7 @@ export const LOCAL_TOOLS = [
   {
     name: "stage_malt_miller_cart",
     description:
-      "Fetches a Brewfather recipe and automatically adds matching ingredients to The Malt Miller cart.",
+      "Fetches a Brewfather recipe and returns a direct Malt Miller search link per ingredient, for manually adding items to the cart. Does not use any Malt Miller account, login, or payment credentials — it only ever generates read-only search links.",
     inputSchema: {
       type: "object",
       properties: {
@@ -338,7 +188,7 @@ export const LOCAL_TOOLS = [
   {
     name: "find_pending_batch_by_recipe_name",
     description:
-      "Finds a pending (Planning status) Brewfather batch by recipe name and lists its ingredients. Returns the recipeId so it can be passed to stage_malt_miller_cart to order the ingredients.",
+      "Finds a pending (Planning status) Brewfather batch by recipe name and lists its ingredients. Returns the recipeId so it can be passed to stage_malt_miller_cart to get shopping links.",
     inputSchema: {
       type: "object",
       properties: {
@@ -397,22 +247,22 @@ export async function callLocalTool(
         env.BREWFATHER_USER_ID,
         env.BREWFATHER_API_KEY,
       );
-      const executionLog = await stageCartOnMaltMiller(recipe, env);
+      const shoppingList = formatShoppingList(recipe);
 
       const summary = `
-Staging complete for recipe "${recipe.name}"!
+Shopping list for "${recipe.name}"
 
---- Execution Log ---
-${executionLog.join("\n")}
+The Malt Miller sits behind bot-protection that blocks automated cart-filling, so here's a direct search link per ingredient — open each and add it to your cart in one click:
 
-🛒 Open your cart to review item quantities and checkout:
-https://www.themaltmiller.co.uk/basket/
+${shoppingList}
+
+No Malt Miller account, login, or payment details are used at any point — these are plain search links only.
       `.trim();
 
       return { content: [{ type: "text", text: summary }] };
     } catch (err: any) {
       return {
-        content: [{ type: "text", text: `Automation failed: ${err.message}` }],
+        content: [{ type: "text", text: `Failed to build shopping list: ${err.message}` }],
         isError: true,
       };
     }
@@ -475,7 +325,7 @@ Recipe: "${recipe.name}" (recipeId: ${recipe._id})
 
 ${formatIngredients(recipe)}
 
-To order these ingredients on The Malt Miller, call stage_malt_miller_cart with recipeId "${recipe._id}".
+To get Malt Miller shopping links for these ingredients, call stage_malt_miller_cart with recipeId "${recipe._id}".
       `.trim();
 
       return { content: [{ type: "text", text: summary }] };
